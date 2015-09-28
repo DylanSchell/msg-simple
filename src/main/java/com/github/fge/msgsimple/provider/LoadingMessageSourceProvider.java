@@ -36,10 +36,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A caching, on-demand loading message source provider with configurable expiry
@@ -75,24 +78,33 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class LoadingMessageSourceProvider
     implements MessageSourceProvider
 {
-    /*
-     * Use daemon threads. We don't give control to the user about the
-     * ExecutorService, and we don't have a reliable way to shut it down (a JVM
-     * shutdown hook does not get involved on a webapp shutdown, so we cannot
-     * use that...).
-     */
-    private static final ThreadFactory THREAD_FACTORY = new ThreadFactory()
-    {
-        private final ThreadFactory factory = Executors.defaultThreadFactory();
+    public static class MsgSimpleThreadFactory implements ThreadFactory {
+        private static final AtomicInteger poolNumber = new AtomicInteger(1);
+        private final ThreadGroup group;
+        private final AtomicInteger threadNumber = new AtomicInteger(1);
+        private final String namePrefix;
 
-        @Override
-        public Thread newThread(final Runnable r)
-        {
-            final Thread ret = factory.newThread(r);
-            ret.setDaemon(true);
-            return ret;
+        MsgSimpleThreadFactory() {
+            SecurityManager s = System.getSecurityManager();
+            group = (s != null) ? s.getThreadGroup() :
+                    Thread.currentThread().getThreadGroup();
+            namePrefix = "msg-simple-pool-" +
+                    poolNumber.getAndIncrement() +
+                    "-thread-";
         }
-    };
+
+        public Thread newThread(Runnable r) {
+            Thread t = new Thread(group, r,
+                    namePrefix + threadNumber.getAndIncrement(),
+                    0);
+            t.setDaemon(true);
+            if (t.getPriority() != Thread.NORM_PRIORITY)
+                t.setPriority(Thread.NORM_PRIORITY);
+            return t;
+        }
+    }
+
+    private static final ThreadFactory THREAD_FACTORY = new MsgSimpleThreadFactory();
 
     private static final InternalBundle BUNDLE = InternalBundle.getInstance();
 
@@ -101,8 +113,10 @@ public final class LoadingMessageSourceProvider
     /*
      * Executor service for loading tasks
      */
-    private final ExecutorService service
-        = Executors.newFixedThreadPool(NTHREADS, THREAD_FACTORY);
+    private final ExecutorService service = new ThreadPoolExecutor(0, NTHREADS,
+        60L,TimeUnit.SECONDS,
+        new SynchronousQueue<Runnable>(),
+        THREAD_FACTORY);
 
     /*
      * Loader and default source
